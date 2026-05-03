@@ -4,17 +4,19 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-# Shared on each ``u`` coordinate: a0 + Σ_k (a_k cos(k·u) + b_k sin(k·u)), then GELU (no π in the phase).
+# Shared scalars on ``u``: σ·(a0 + Σ_k (a_k cos(k·u) + b_k sin(k·u))) with σ = std(u) along features, then GELU (no π in the phase).
 FOURIER_HARMONICS = 3
 
 
 class RPAN(nn.Module):
     """LayerNorm → spherical in ℝᵐ → shared Fourier series on ``u`` → GELU → back on sphere → ℝⁿ.
 
-    On unit direction ``u``, build an element-wise sum ``c₀ + Σ_k (c_{2k-1} cos(ku) + c_{2k} sin(ku))``
-    with ``2 * FOURIER_HARMONICS + 1`` **shared** scalars (same across all ``m`` coordinates).
+    On unit direction ``u``, build ``σ (c₀ + Σ_k (c_{2k-1} cos(ku) + c_{2k} sin(ku)))`` where
+    ``σ = std(u; dim=-1)`` (broadcast) and ``c`` are ``2 * FOURIER_HARMONICS + 1`` **shared** learned
+    scalars (same across all ``m`` coordinates). Equivalently each ``c_j`` is scaled by ``σ``.
     Apply **GELU** to that field, add to ``u``, renormalize to
-    ``S^{m-1}``, scale by ``r``, and map back to ``n`` dims when ``n != m``.
+    ``S^{m-1}``, scale by ``-log(r σ)`` with ``σ = std(u)`` (argument clamped to ``eps``), and map
+    back to ``n`` dims when ``n != m``.
 
     When ``n == m``, there is no learned ``Linear`` into/out of the sphere (only ``LayerNorm`` and
     ``fourier_coeffs``).
@@ -34,23 +36,25 @@ class RPAN(nn.Module):
             self.to_m = None
             self.to_n = None
 
-    def _fourier_on_u(self, u: torch.Tensor) -> torch.Tensor:
+    def _fourier_on_u(self, u: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         c = self.fourier_coeffs
         f = c[0].expand_as(u)
         for k in range(1, FOURIER_HARMONICS + 1):
             ang = k * u
             f = f + c[2 * k - 1] * torch.cos(ang) + c[2 * k] * torch.sin(ang)
-        return f
+        return f * sigma
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.ln(x)
         z = self.to_m(h) if self.n != self.m else h
         r = z.norm(dim=-1, keepdim=True).clamp_min(self.eps)
         u = z / r
-        f = self._fourier_on_u(u)
+        sigma = u.std(dim=-1, keepdim=True)
+        f = self._fourier_on_u(u, sigma)
         g = F.gelu(f)
         u_hat = F.normalize(u + g, dim=-1, eps=self.eps)
-        z_cart = u_hat * r
+        rad = -torch.log((r * sigma).clamp_min(self.eps))
+        z_cart = u_hat * rad
         return self.to_n(z_cart) if self.n != self.m else z_cart
 
 
