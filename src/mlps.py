@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+# Shared Fourier harmonics on each ``u`` component: a0 + Σ_k (a_k cos(kπu) + b_k sin(kπu)), then GELU.
+FOURIER_HARMONICS = 3
+
 
 class RPAN(nn.Module):
-    """LayerNorm → spherical (radius + unit direction) in ℝᵐ → deg-5 poly on ``u`` → Cartesian ℝᵐ → ℝⁿ.
+    """LayerNorm → spherical in ℝᵐ → shared Fourier series on ``u`` → GELU → back on sphere → ℝⁿ.
 
-    When ``n == m`` (the airfoil MLP uses only this case), there is **no** learned map into or out of
-    the sphere: ``z`` is the normalized activations, spherical decomposition ``(r, u)`` and
-    reconstruction ``r * û`` are fixed geometry. Learned parameters are ``LayerNorm`` affine (optional
-    path) and the six **shared** polynomial coefficients.
+    On unit direction ``u`` (per coordinate in ``[-1, 1]`` on the sphere), build an element-wise
+    **Fourier polynomial** with ``2 * FOURIER_HARMONICS + 1`` **shared** scalar coefficients (same
+    across all ``m`` coordinates). Apply **GELU** to that field, add to ``u``, renormalize to
+    ``S^{m-1}``, scale by ``r``, and map back to ``n`` dims when ``n != m``.
 
-    If ``n != m``, learned ``Linear(n, m)`` / ``Linear(m, n)`` wrap that geometry (not used in
-    ``AirfoilMLPRPAN``).
+    When ``n == m``, there is no learned ``Linear`` into/out of the sphere (only ``LayerNorm`` and
+    ``fourier_coeffs``).
     """
 
     def __init__(self, n: int, m: int, eps: float = 1e-8) -> None:
@@ -23,7 +28,7 @@ class RPAN(nn.Module):
         self.m = m
         self.eps = eps
         self.ln = nn.LayerNorm(n)
-        self.coeffs = nn.Parameter(torch.zeros(6))
+        self.fourier_coeffs = nn.Parameter(torch.zeros(2 * FOURIER_HARMONICS + 1))
         if n != m:
             self.to_m = nn.Linear(n, m)
             self.to_n = nn.Linear(m, n)
@@ -31,18 +36,22 @@ class RPAN(nn.Module):
             self.to_m = None
             self.to_n = None
 
+    def _fourier_on_u(self, u: torch.Tensor) -> torch.Tensor:
+        c = self.fourier_coeffs
+        f = c[0].expand_as(u)
+        for k in range(1, FOURIER_HARMONICS + 1):
+            ang = (math.pi * k) * u
+            f = f + c[2 * k - 1] * torch.cos(ang) + c[2 * k] * torch.sin(ang)
+        return f
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.ln(x)
         z = self.to_m(h) if self.n != self.m else h
         r = z.norm(dim=-1, keepdim=True).clamp_min(self.eps)
         u = z / r
-        poly = torch.zeros_like(u)
-        p = torch.ones_like(u)
-        for k in range(6):
-            if k > 0:
-                p = p * u
-            poly = poly + self.coeffs[k] * p
-        u_hat = F.normalize(u + poly, dim=-1, eps=self.eps)
+        f = self._fourier_on_u(u)
+        g = F.gelu(f)
+        u_hat = F.normalize(u + g, dim=-1, eps=self.eps)
         z_cart = u_hat * r
         return self.to_n(z_cart) if self.n != self.m else z_cart
 
