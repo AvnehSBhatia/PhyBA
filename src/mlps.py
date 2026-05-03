@@ -1,21 +1,19 @@
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-# Shared Fourier harmonics on each ``u`` component: a0 + Σ_k (a_k cos(kπu) + b_k sin(kπu)), then GELU.
+# Shared on each ``u`` coordinate: a0 + Σ_k (a_k cos(k·u) + b_k sin(k·u)), then GELU (no π in the phase).
 FOURIER_HARMONICS = 3
 
 
 class RPAN(nn.Module):
     """LayerNorm → spherical in ℝᵐ → shared Fourier series on ``u`` → GELU → back on sphere → ℝⁿ.
 
-    On unit direction ``u`` (per coordinate in ``[-1, 1]`` on the sphere), build an element-wise
-    **Fourier polynomial** with ``2 * FOURIER_HARMONICS + 1`` **shared** scalar coefficients (same
-    across all ``m`` coordinates). Apply **GELU** to that field, add to ``u``, renormalize to
+    On unit direction ``u``, build an element-wise sum ``c₀ + Σ_k (c_{2k-1} cos(ku) + c_{2k} sin(ku))``
+    with ``2 * FOURIER_HARMONICS + 1`` **shared** scalars (same across all ``m`` coordinates).
+    Apply **GELU** to that field, add to ``u``, renormalize to
     ``S^{m-1}``, scale by ``r``, and map back to ``n`` dims when ``n != m``.
 
     When ``n == m``, there is no learned ``Linear`` into/out of the sphere (only ``LayerNorm`` and
@@ -40,7 +38,7 @@ class RPAN(nn.Module):
         c = self.fourier_coeffs
         f = c[0].expand_as(u)
         for k in range(1, FOURIER_HARMONICS + 1):
-            ang = (math.pi * k) * u
+            ang = k * u
             f = f + c[2 * k - 1] * torch.cos(ang) + c[2 * k] * torch.sin(ang)
         return f
 
