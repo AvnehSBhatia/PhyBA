@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train gelu / linear / rpan MLPs on data/train.csv; validate on data/val.csv."""
+"""Train gelu / linear / rpan MLPs with geometry MAE (Kulfan surface) on val; logs CST MAE too."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 import sys
 
@@ -16,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.cst_geom import cst_mae_physical, geom_mae_physical
 from src.dataset import AirfoilCSVDataset, load_airfoil_frame
 from src.mlps import AirfoilMLPGELU, AirfoilMLPLinear, AirfoilMLPRPAN
 
@@ -61,39 +63,52 @@ def main() -> None:
         model = AirfoilMLPRPAN()
     model.to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    loss_fn = nn.MSELoss()
+    ym = y_mean.to(device)
+    ys = y_std.to(device)
 
-    best_val = float("inf")
+    best_val_geom = float("inf")
     out_path = args.out or (ROOT / "models" / f"mlp_{args.arch}.pt")
 
-    for epoch in range(1, args.epochs + 1):
+    epoch_bar = tqdm(
+        range(1, args.epochs + 1),
+        desc=f"{args.arch} train",
+        unit="epoch",
+    )
+    for epoch in epoch_bar:
         model.train()
-        train_loss = 0.0
+        train_geom = 0.0
         n_tr = 0
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             opt.zero_grad()
             pred = model(xb)
-            loss = loss_fn(pred, yb)
+            pred_p = pred * ys + ym
+            tgt_p = yb * ys + ym
+            loss = geom_mae_physical(pred_p, tgt_p)
             loss.backward()
             opt.step()
-            train_loss += loss.item() * xb.size(0)
+            train_geom += loss.item() * xb.size(0)
             n_tr += xb.size(0)
-        train_loss /= max(n_tr, 1)
+        train_geom /= max(n_tr, 1)
 
         model.eval()
-        val_loss = 0.0
+        val_geom = 0.0
+        val_cst = 0.0
         n_va = 0
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred = model(xb)
-                val_loss += loss_fn(pred, yb).item() * xb.size(0)
+                pred_p = pred * ys + ym
+                tgt_p = yb * ys + ym
+                val_geom += geom_mae_physical(pred_p, tgt_p).item() * xb.size(0)
+                val_cst += cst_mae_physical(pred_p, tgt_p).item() * xb.size(0)
                 n_va += xb.size(0)
-        val_loss /= max(n_va, 1)
+        val_geom /= max(n_va, 1)
+        val_cst /= max(n_va, 1)
 
-        if val_loss < best_val:
-            best_val = val_loss
+        if val_geom < best_val_geom:
+            best_val_geom = val_geom
             out_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(
                 {
@@ -104,13 +119,19 @@ def main() -> None:
                     "y_mean": y_mean.cpu(),
                     "y_std": y_std.cpu(),
                     "epochs": epoch,
-                    "val_loss_normed": val_loss,
+                    "val_geom_mae": val_geom,
+                    "val_cst_mae": val_cst,
                 },
                 out_path,
             )
 
-        if epoch % 20 == 0 or epoch == 1:
-            print(f"epoch {epoch:4d}  train {train_loss:.6f}  val {val_loss:.6f}  best_val {best_val:.6f}")
+        epoch_bar.set_postfix(
+            train_ge=f"{train_geom:.5f}",
+            val_ge=f"{val_geom:.5f}",
+            val_cst=f"{val_cst:.5f}",
+            best=f"{best_val_geom:.5f}",
+            refresh=False,
+        )
 
     print(f"Saved best checkpoint to {out_path}")
 

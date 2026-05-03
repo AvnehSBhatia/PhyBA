@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Load a trained checkpoint and plot true vs predicted CST coefficients on validation rows."""
+"""Load a trained checkpoint; CST overlays, per-sample CST vs geometry error scatter, coefficient MAE."""
 
 from __future__ import annotations
 
@@ -10,11 +10,13 @@ import sys
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.cst_geom import cst_airfoil_surface
 from src.dataset import load_airfoil_frame
 from src.mlps import AirfoilMLPGELU, AirfoilMLPLinear, AirfoilMLPRPAN
 
@@ -79,7 +81,7 @@ def main() -> None:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     coeffs = list(range(8))
-    for j in range(n):
+    for j in tqdm(range(n), desc="CST overlays", leave=False):
         i = int(idx[j])
         yt = y_raw[j].cpu().numpy()
         yp = pred[j].cpu().numpy()
@@ -104,6 +106,27 @@ def main() -> None:
     with torch.no_grad():
         pr = model(xv_in) * y_std + y_mean
     mae = (pr - yv).abs().mean(0).cpu().numpy()
+    cst_row = (pr - yv).abs().mean(dim=1).cpu().numpy()
+    sp = cst_airfoil_surface(pr)
+    st = cst_airfoil_surface(yv)
+    geom_row = (sp - st).abs().mean(dim=1).cpu().numpy()
+
+    fig, ax = plt.subplots(figsize=(5.2, 5.2))
+    ax.scatter(cst_row, geom_row, alpha=0.35, s=12, c="steelblue", edgecolors="none")
+    lim = max(float(cst_row.max()), float(geom_row.max()), 1e-9) * 1.05
+    ax.plot([0, lim], [0, lim], "k--", alpha=0.45, label="y = x")
+    ax.set_xlim(0, lim)
+    ax.set_ylim(0, lim)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("CST MAE per sample (mean |Δcoeff|)")
+    ax.set_ylabel("Geom MAE per sample (mean |Δy/c| on surface)")
+    ax.set_title(f"CST vs geometry error — {args.ckpt.name}")
+    ax.legend(loc="upper left")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(args.out_dir / f"cst_vs_geom_scatter_{arch}.png", dpi=150)
+    plt.close(fig)
+
     fig, ax = plt.subplots(figsize=(6, 3.5))
     ax.bar(coeffs, mae, color="steelblue")
     ax.set_xticks(coeffs)
@@ -113,7 +136,10 @@ def main() -> None:
     fig.tight_layout()
     fig.savefig(args.out_dir / f"cst_mae_per_dim_{arch}.png", dpi=150)
     plt.close(fig)
-    print(f"Wrote {n} overlays and cst_mae_per_dim_{arch}.png to {args.out_dir}")
+    print(
+        f"Wrote {n} overlays, cst_mae_per_dim_{arch}.png, "
+        f"cst_vs_geom_scatter_{arch}.png to {args.out_dir}"
+    )
 
 
 if __name__ == "__main__":
