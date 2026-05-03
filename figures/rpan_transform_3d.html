@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>RPAN direction transform (3D)</title>
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; background: #111; color: #e8e8e8; }
+    h1 { font-size: 1.1rem; font-weight: 600; }
+    p, label { font-size: 0.85rem; color: #aaa; }
+    #plot { width: 100%; height: 72vh; min-height: 420px; }
+    .controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; margin: 12px 0 8px; }
+    .controls label { display: flex; flex-direction: column; gap: 2px; color: #ccc; min-width: 72px; }
+    input[type="range"] { width: 120px; }
+    input[type="number"] { width: 88px; padding: 4px 8px; background: #222; color: #eee; border: 1px solid #444; border-radius: 4px; }
+    button { padding: 6px 12px; cursor: pointer; background: #333; color: #eee; border: 1px solid #555; border-radius: 6px; }
+    button:hover { background: #444; }
+    code { color: #9cf; }
+    .single { margin: 20px 0; padding: 14px; background: #1a1a1a; border-radius: 8px; border: 1px solid #333; max-width: 720px; }
+    .single h2 { font-size: 1rem; margin: 0 0 8px; color: #ddd; }
+    .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-top: 10px; }
+    .row label { display: flex; flex-direction: column; gap: 4px; color: #bbb; }
+    pre#readout { margin: 12px 0 0; padding: 10px; background: #0d0d0d; border-radius: 6px; color: #8f8; font-size: 0.8rem; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>RPAN direction map in ℝ³</h1>
+  <p>
+    Matches <code>src/mlps.py</code> (no π): per coordinate
+    <code>fᵢ = c₀ + Σₖ (c₂ₖ₋₁ cos(k·uᵢ) + c₂ₖ sin(k·uᵢ))</code>, then
+    <code>g = GELU(f)</code>, <code>û = normalize(u + g)</code>.
+    <strong>LayerNorm and radius <code>r</code> are omitted</strong> so you only see the spherical-direction warp.
+  </p>
+  <div class="controls" id="sliders"></div>
+  <div><button type="button" id="reset">Reset coeffs</button></div>
+
+  <section class="single">
+    <h2>Try your 3D vector</h2>
+    <p>Enter any nonzero <code>(x, y, z)</code>. The map uses <code>u = v / ‖v‖</code> (same as RPAN’s direction <code>z/‖z‖</code>), then <code>û = normalize(u + GELU(f(u)))</code>.</p>
+    <div class="row">
+      <label>x <input type="number" id="vx" step="any" value="0.3" /></label>
+      <label>y <input type="number" id="vy" step="any" value="0.5" /></label>
+      <label>z <input type="number" id="vz" step="any" value="0.2" /></label>
+      <button type="button" id="transform">Transform</button>
+    </div>
+    <pre id="readout"></pre>
+  </section>
+
+  <div id="plot"></div>
+
+  <script>
+    const K = 3;
+    const N = 900;
+
+    function gelu(x) {
+      return 0.5 * x * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (x + 0.044715 * x * x * x)));
+    }
+
+    function fibonacciSphere(n) {
+      const pts = [];
+      const golden = (1 + Math.sqrt(5)) / 2;
+      for (let i = 0; i < n; i++) {
+        const t = i / golden;
+        const phi = 2 * Math.PI * (i / golden - Math.floor(i / golden));
+        const y = 1 - (2 * (i + 0.5)) / n;
+        const r = Math.sqrt(Math.max(0, 1 - y * y));
+        pts.push([Math.cos(phi) * r, y, Math.sin(phi) * r]);
+      }
+      return pts;
+    }
+
+    function fourierScalar(x, c) {
+      let f = c[0];
+      for (let k = 1; k <= K; k++) {
+        const ang = k * x;
+        f += c[2 * k - 1] * Math.cos(ang) + c[2 * k] * Math.sin(ang);
+      }
+      return f;
+    }
+
+    function fourierVec(u, c) {
+      return [
+        fourierScalar(u[0], c),
+        fourierScalar(u[1], c),
+        fourierScalar(u[2], c),
+      ];
+    }
+
+    function normalize3(v) {
+      const n = Math.hypot(v[0], v[1], v[2]);
+      if (n < 1e-12) return [0, 0, 1];
+      return [v[0] / n, v[1] / n, v[2] / n];
+    }
+
+    function rpanDirection(u, c) {
+      const f = fourierVec(u, c);
+      const g = [gelu(f[0]), gelu(f[1]), gelu(f[2])];
+      return normalize3([u[0] + g[0], u[1] + g[1], u[2] + g[2]]);
+    }
+
+    const defaultC = [0.05, 0.15, -0.1, 0.12, -0.08, 0.1, -0.05];
+    let coeffs = [...defaultC];
+
+    const U = fibonacciSphere(N);
+
+    let customV = [0.3, 0.5, 0.2];
+
+    function buildTraces(c, vRaw) {
+      const xi = [], yi = [], zi = [];
+      const xo = [], yo = [], zo = [];
+      const xl = [], yl = [], zl = [];
+      const step = Math.max(1, Math.floor(N / 120));
+      for (let i = 0; i < N; i++) {
+        const u = U[i];
+        const o = rpanDirection(u, c);
+        xi.push(u[0]); yi.push(u[1]); zi.push(u[2]);
+        xo.push(o[0]); yo.push(o[1]); zo.push(o[2]);
+        if (i % step === 0) {
+          xl.push(u[0], o[0], null);
+          yl.push(u[1], o[1], null);
+          zl.push(u[2], o[2], null);
+        }
+      }
+      const traces = [
+        {
+          type: "scatter3d",
+          mode: "markers",
+          name: "input u",
+          x: xi, y: yi, z: zi,
+          marker: { size: 2, color: "#5af", opacity: 0.55 },
+        },
+        {
+          type: "scatter3d",
+          mode: "markers",
+          name: "output û",
+          x: xo, y: yo, z: zo,
+          marker: { size: 2, color: "#fa5", opacity: 0.55 },
+        },
+        {
+          type: "scatter3d",
+          mode: "lines",
+          name: "u → û (sampled)",
+          x: xl, y: yl, z: zl,
+          line: { color: "#888", width: 1 },
+          opacity: 0.35,
+        },
+      ];
+      if (vRaw && vRaw.length === 3) {
+        const nv = Math.hypot(vRaw[0], vRaw[1], vRaw[2]);
+        if (nv >= 1e-12) {
+          const u = normalize3(vRaw);
+          const out = rpanDirection(u, c);
+          traces.push({
+            type: "scatter3d",
+            mode: "markers",
+            name: "your u",
+            x: [u[0]], y: [u[1]], z: [u[2]],
+            marker: { size: 10, color: "#0ff", symbol: "diamond", line: { color: "#fff", width: 1 } },
+          });
+          traces.push({
+            type: "scatter3d",
+            mode: "markers",
+            name: "your û",
+            x: [out[0]], y: [out[1]], z: [out[2]],
+            marker: { size: 10, color: "#f0f", symbol: "diamond", line: { color: "#fff", width: 1 } },
+          });
+          traces.push({
+            type: "scatter3d",
+            mode: "lines",
+            name: "your u → û",
+            x: [u[0], out[0]], y: [u[1], out[1]], z: [u[2], out[2]],
+            line: { color: "#fff", width: 4 },
+          });
+        }
+      }
+      return traces;
+    }
+
+    const layout = {
+      paper_bgcolor: "#111",
+      plot_bgcolor: "#111",
+      scene: {
+        bgcolor: "#111",
+        xaxis: { title: "x", color: "#888", gridcolor: "#333", zerolinecolor: "#444" },
+        yaxis: { title: "y", color: "#888", gridcolor: "#333", zerolinecolor: "#444" },
+        zaxis: { title: "z", color: "#888", gridcolor: "#333", zerolinecolor: "#444" },
+        aspectmode: "cube",
+        camera: { eye: { x: 1.45, y: 1.1, z: 0.95 } },
+      },
+      margin: { l: 0, r: 0, t: 36, b: 0 },
+      legend: { font: { color: "#ccc" } },
+      title: {
+        text: "Sphere cloud: u (blue) → û (orange). Your vector: u (cyan) → û (magenta).",
+        font: { color: "#ddd", size: 14 },
+      },
+    };
+
+    const config = { responsive: true, displayModeBar: true };
+
+    function formatVec(a) {
+      return `[${a.map((x) => x.toFixed(6)).join(", ")}]`;
+    }
+
+    let plotReady = false;
+
+    function redraw() {
+      const vRaw = customV;
+      if (vRaw && vRaw.length === 3) {
+        const nv = Math.hypot(vRaw[0], vRaw[1], vRaw[2]);
+        if (nv >= 1e-12) {
+          const u = normalize3(vRaw);
+          const out = rpanDirection(u, coeffs);
+          const fv = fourierVec(u, coeffs);
+          const gv = [gelu(fv[0]), gelu(fv[1]), gelu(fv[2])];
+          document.getElementById("readout").textContent =
+            `v   = ${formatVec(vRaw)}   ‖v‖ = ${nv.toFixed(6)}\n` +
+            `u   = ${formatVec(u)}   (unit direction)\n` +
+            `f(u)= ${formatVec(fv)}\n` +
+            `GELU(f) = ${formatVec(gv)}\n` +
+            `û   = ${formatVec(out)}   (unit output)`;
+        } else {
+          document.getElementById("readout").textContent = "v must be nonzero.";
+        }
+      }
+      const data = buildTraces(coeffs, vRaw);
+      if (!plotReady) {
+        Plotly.newPlot("plot", data, layout, config);
+        plotReady = true;
+      } else {
+        Plotly.react("plot", data, layout, config);
+      }
+    }
+
+    const sliderWrap = document.getElementById("sliders");
+    const labels = ["c₀", "c₁ cos(u)", "c₂ sin(u)", "c₃ cos(2u)", "c₄ sin(2u)", "c₅ cos(3u)", "c₆ sin(3u)"];
+    for (let i = 0; i < 7; i++) {
+      const lab = document.createElement("label");
+      lab.innerHTML = `<span>${labels[i]}</span>`;
+      const inp = document.createElement("input");
+      inp.type = "range";
+      inp.min = "-0.5";
+      inp.max = "0.5";
+      inp.step = "0.01";
+      inp.value = String(coeffs[i]);
+      inp.dataset.idx = String(i);
+      inp.addEventListener("input", () => {
+        coeffs[i] = parseFloat(inp.value);
+        redraw();
+      });
+      lab.appendChild(inp);
+      sliderWrap.appendChild(lab);
+    }
+
+    document.getElementById("reset").addEventListener("click", () => {
+      coeffs = [...defaultC];
+      sliderWrap.querySelectorAll("input[type=range]").forEach((inp, i) => {
+        inp.value = String(coeffs[i]);
+      });
+      redraw();
+    });
+
+    function readCustomFromInputs() {
+      const x = parseFloat(document.getElementById("vx").value);
+      const y = parseFloat(document.getElementById("vy").value);
+      const z = parseFloat(document.getElementById("vz").value);
+      if ([x, y, z].some((n) => Number.isNaN(n))) {
+        document.getElementById("readout").textContent = "Enter valid numbers for x, y, z.";
+        return null;
+      }
+      return [x, y, z];
+    }
+
+    document.getElementById("transform").addEventListener("click", () => {
+      const v = readCustomFromInputs();
+      if (v) {
+        customV = v;
+        redraw();
+      }
+    });
+    ["vx", "vy", "vz"].forEach((id) => {
+      document.getElementById(id).addEventListener("keydown", (e) => {
+        if (e.key === "Enter") document.getElementById("transform").click();
+      });
+    });
+
+    redraw();
+  </script>
+</body>
+</html>

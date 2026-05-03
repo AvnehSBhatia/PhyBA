@@ -34,7 +34,7 @@ if str(ROOT) not in sys.path:
 
 from src.cst_geom import cst_airfoil_surface, cst_mae_physical, geom_mae_physical
 from src.dataset import load_airfoil_frame
-from src.mlps import AirfoilMLPGELU, AirfoilMLPLinear, AirfoilMLPRPAN
+from src.mlps import AirfoilMLPGELU, AirfoilMLPLinear, AirfoilMLPRPAN, AirfoilPureRPAN
 
 ARCHS = ("gelu", "linear", "rpan")
 
@@ -124,6 +124,8 @@ def _make_model(arch: str) -> nn.Module:
         return AirfoilMLPLinear()
     if arch == "rpan":
         return AirfoilMLPRPAN()
+    if arch == "pure_rpan":
+        return AirfoilPureRPAN()
     raise ValueError(arch)
 
 
@@ -177,7 +179,8 @@ def _train_one(
     compile_model: bool,
 ) -> dict:
     model = _make_model(arch).to(device)
-    if compile_model:
+    # Very deep pure_rpan: compiling the forward graph is slow / fragile.
+    if compile_model and arch != "pure_rpan":
         model = _compile_forward(model)
 
     opt = torch.optim.AdamW(model.parameters(), lr=lr, fused=True)

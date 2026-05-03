@@ -1,5 +1,5 @@
 from __future__ import annotations
 
-from .mlps import AirfoilMLPGELU, AirfoilMLPLinear, AirfoilMLPRPAN, RPAN
+from .mlps import AirfoilMLPGELU, AirfoilMLPLinear, AirfoilMLPRPAN, AirfoilPureRPAN, RPAN
 
-__all__ = ["AirfoilMLPGELU", "AirfoilMLPLinear", "AirfoilMLPRPAN", "RPAN"]
+__all__ = ["AirfoilMLPGELU", "AirfoilMLPLinear", "AirfoilMLPRPAN", "AirfoilPureRPAN", "RPAN"]

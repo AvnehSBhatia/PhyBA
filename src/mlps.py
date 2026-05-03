@@ -54,6 +54,61 @@ class RPAN(nn.Module):
         return self.to_n(z_cart) if self.n != self.m else z_cart
 
 
+def _pure_rpan_stem_head_params(hidden_dim: int) -> int:
+    """``Linear(5, d)`` + ``Linear(d, 8)`` parameter count."""
+    return (5 * hidden_dim + hidden_dim) + (hidden_dim * 8 + 8)
+
+
+def _pure_rpan_block_params(hidden_dim: int) -> int:
+    """``RPAN(d, d)``: LayerNorm ``2d`` + shared Fourier ``7`` (no in/out linears)."""
+    return 2 * hidden_dim + 7
+
+
+def num_rpan_for_target_params(hidden_dim: int, target_params: int) -> int:
+    """How many ``RPAN(hidden_dim, hidden_dim)`` blocks fit under ``target_params`` after stem+head."""
+    fixed = _pure_rpan_stem_head_params(hidden_dim)
+    per = _pure_rpan_block_params(hidden_dim)
+    return max(1, (target_params - fixed) // per)
+
+
+class AirfoilPureRPAN(nn.Module):
+    """Only RPAN blocks in the trunk: ``Linear(5, d)`` → ``RPAN(d,d)`` × L → ``Linear(d, 8)``.
+
+    No hidden ``Linear`` layers—just the two boundary projections and repeated
+    ``RPAN``. With ``hidden_dim=16``, each ``RPAN(16, 16)`` has ``2·16 + 7 = 39``
+    learnable scalars, so reaching ~100k parameters requires a **large** L
+    (on the order of thousands); that is intentional if you insist on ``d=16``.
+
+    Pass ``num_rpan`` explicitly to override the count derived from
+    ``target_params``.
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int = 16,
+        *,
+        target_params: int = 100_000,
+        num_rpan: int | None = None,
+    ) -> None:
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        if num_rpan is None:
+            self.num_rpan = num_rpan_for_target_params(hidden_dim, target_params)
+        else:
+            self.num_rpan = num_rpan
+        self.in_proj = nn.Linear(5, hidden_dim)
+        self.rpans = nn.ModuleList(
+            [RPAN(hidden_dim, hidden_dim) for _ in range(self.num_rpan)]
+        )
+        self.head = nn.Linear(hidden_dim, 8)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.in_proj(x)
+        for r in self.rpans:
+            h = r(h)
+        return self.head(h)
+
+
 class AirfoilMLPRPAN(nn.Module):
     """5 → 256 with RPAN between each linear down to 8-d output (no RPAN after last linear)."""
 

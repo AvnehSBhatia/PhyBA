@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train gelu / linear / rpan MLPs with geometry MAE (Kulfan surface) on val; logs CST MAE too."""
+"""Train gelu / linear / rpan / pure_rpan MLPs with geometry MAE (Kulfan surface) on val; logs CST MAE too."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def _loader_kwargs(device: torch.device) -> dict:
 
 
 from src.dataset import AirfoilCSVDataset, load_airfoil_frame
-from src.mlps import AirfoilMLPGELU, AirfoilMLPLinear, AirfoilMLPRPAN
+from src.mlps import AirfoilMLPGELU, AirfoilMLPLinear, AirfoilMLPRPAN, AirfoilPureRPAN
 
 
 def _fit_norm_stats(train_path: Path) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -44,7 +44,11 @@ def _fit_norm_stats(train_path: Path) -> tuple[torch.Tensor, torch.Tensor, torch
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--arch", choices=("gelu", "linear", "rpan"), default="gelu")
+    p.add_argument(
+        "--arch",
+        choices=("gelu", "linear", "rpan", "pure_rpan"),
+        default="gelu",
+    )
     p.add_argument("--train", type=Path, default=ROOT / "data" / "train.csv")
     p.add_argument("--val", type=Path, default=ROOT / "data" / "val.csv")
     p.add_argument("--epochs", type=int, default=200)
@@ -71,8 +75,10 @@ def main() -> None:
         model: nn.Module = AirfoilMLPGELU()
     elif args.arch == "linear":
         model = AirfoilMLPLinear()
-    else:
+    elif args.arch == "rpan":
         model = AirfoilMLPRPAN()
+    else:
+        model = AirfoilPureRPAN()
     model.to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
     ym = y_mean.to(device)
