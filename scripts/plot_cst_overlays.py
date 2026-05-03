@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 from src.cst_geom import cst_airfoil_surface
 from src.dataset import load_airfoil_frame
-from src.mlps import AirfoilMLPGELU, AirfoilMLPLinear, AirfoilMLPRPAN, AirfoilPureRPAN
+from src.mlps import AirfoilMLPGELU, AirfoilMLPLinear, AirfoilMLPRPAN
 
 
 def load_model(arch: str, ckpt: dict, device: torch.device) -> nn.Module:
@@ -28,8 +28,6 @@ def load_model(arch: str, ckpt: dict, device: torch.device) -> nn.Module:
         model = AirfoilMLPLinear()
     elif arch in ("rpan", "mything"):
         model = AirfoilMLPRPAN()
-    elif arch == "pure_rpan":
-        model = AirfoilPureRPAN()
     else:
         raise ValueError(f"Unknown arch: {arch}")
     sd = ckpt["state_dict"]
