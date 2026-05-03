@@ -8,12 +8,16 @@ import torch
 # Class exponents (rounded LE, sharp TE typical airfoil)
 CLASS_N = 0.5
 CLASS_M = 1.0
-N_CHORD_PTS = 96
+# Fewer samples = faster geom loss; must match ``cst_fit`` grid.
+N_CHORD_PTS = 64
+# Class function is 0 at x=1; stay inside (0,1) so C does not vanish (stable fit vs loss).
+_CHORD_X0 = 1e-4
+_CHORD_X1 = 1.0 - 2e-3
 
 
 def _chord_x(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    """Chordal stations x/c in (0, 1], avoid x=0 singularity for CLASS_N < 1."""
-    return torch.linspace(1e-4, 1.0, N_CHORD_PTS, device=device, dtype=dtype)
+    """Chordal stations x/c strictly inside (0, 1) so ``C(x)`` stays bounded below."""
+    return torch.linspace(_CHORD_X0, _CHORD_X1, N_CHORD_PTS, device=device, dtype=dtype)
 
 
 def _class_function(x: torch.Tensor) -> torch.Tensor:

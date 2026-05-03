@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -25,6 +26,14 @@ from src.dataset import AirfoilCSVDataset, load_airfoil_frame
 from src.mlps import AirfoilMLPGELU, AirfoilMLPLinear, AirfoilMLPRPAN
 
 ARCHS = ("gelu", "linear", "rpan")
+
+
+def _loader_kwargs(device: torch.device) -> dict:
+    nw = int(os.environ.get("PHYBA_NUM_WORKERS", "4"))
+    cpu = os.cpu_count() or 4
+    nw = max(0, min(nw, cpu))
+    pm = device.type == "cuda"
+    return {"num_workers": nw, "pin_memory": pm, "persistent_workers": nw > 0}
 
 
 def _fit_norm_stats(train_path: Path) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -80,6 +89,7 @@ def _train_one(
     for epoch in epoch_bar:
         model.train()
         train_geom = 0.0
+        train_cst = 0.0
         n_tr = 0
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
@@ -91,8 +101,11 @@ def _train_one(
             loss.backward()
             opt.step()
             train_geom += loss.item() * xb.size(0)
+            with torch.no_grad():
+                train_cst += cst_mae_physical(pred_p, tgt_p).item() * xb.size(0)
             n_tr += xb.size(0)
         train_geom /= max(n_tr, 1)
+        train_cst /= max(n_tr, 1)
 
         model.eval()
         val_geom = 0.0
@@ -131,10 +144,11 @@ def _train_one(
             )
 
         epoch_bar.set_postfix(
-            tr_g=f"{train_geom:.5f}",
-            v_g=f"{val_geom:.5f}",
-            v_c=f"{val_cst:.5f}",
-            best=f"{best_val_geom:.5f}",
+            tr_g=f"{train_geom:.4f}",
+            tr_c=f"{train_cst:.4f}",
+            v_g=f"{val_geom:.4f}",
+            v_c=f"{val_cst:.4f}",
+            best=f"{best_val_geom:.4f}",
             refresh=False,
         )
 
@@ -174,7 +188,8 @@ def _benchmark_physical(
     model.eval()
 
     val_ds = AirfoilCSVDataset(val_path, x_mean.cpu(), x_std.cpu(), y_mean.cpu(), y_std.cpu())
-    loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    lk = _loader_kwargs(device)
+    loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, **lk)
 
     sse_phys = 0.0
     sae_cst = 0.0
@@ -246,6 +261,7 @@ def main() -> None:
     )
     args = p.parse_args()
     device = torch.device(args.device)
+    lk = _loader_kwargs(device)
 
     torch.manual_seed(args.seed)
     if device.type == "cuda":
@@ -254,8 +270,8 @@ def main() -> None:
     x_mean, x_std, y_mean, y_std = _fit_norm_stats(args.train)
     train_ds = AirfoilCSVDataset(args.train, x_mean, x_std, y_mean, y_std)
     val_ds = AirfoilCSVDataset(args.val, x_mean, x_std, y_mean, y_std)
-    train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True, drop_last=False)
-    val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False)
+    train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True, drop_last=False, **lk)
+    val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False, **lk)
 
     rows: list[dict] = []
     args.out_dir.mkdir(parents=True, exist_ok=True)

@@ -9,9 +9,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.cst_geom import CLASS_M, CLASS_N, N_CHORD_PTS
+from src.cst_geom import CLASS_M, CLASS_N, N_CHORD_PTS, _CHORD_X0, _CHORD_X1
 
-_CHORD_X = np.linspace(1e-4, 1.0, N_CHORD_PTS, dtype=np.float64)
+_CHORD_X = np.linspace(_CHORD_X0, _CHORD_X1, N_CHORD_PTS, dtype=np.float64)
+
+# Ridge for inverting shape from surface samples → CST (ill-conditioned near TE).
+_RIDGE_LAMBDA = 1e-2
 
 
 def _normalize_chord_x(xy: np.ndarray) -> np.ndarray:
@@ -62,7 +65,15 @@ def _bernstein_mat(x: np.ndarray) -> np.ndarray:
 
 _BERN = _bernstein_mat(_CHORD_X)
 _CLASS = _class_vec(_CHORD_X)
-_CLASS_SAFE = np.maximum(_CLASS, 1e-8)
+_CLASS_SAFE = np.maximum(_CLASS, 1e-4)
+
+
+def _ridge_least_squares(B: np.ndarray, z: np.ndarray) -> np.ndarray:
+    """Solve min ||B a - z||^2 + λ ||a||^2."""
+    d = B.shape[1]
+    a = B.T @ B + _RIDGE_LAMBDA * np.eye(d, dtype=np.float64)
+    rhs = B.T @ z
+    return np.linalg.solve(a, rhs)
 
 
 def parse_coords(val: Any) -> np.ndarray:
@@ -94,8 +105,8 @@ def fit_cst_from_coords_row(xy: np.ndarray) -> np.ndarray:
     yl = _interp_clipped(_CHORD_X, xl, yl_pts)
     zu = yu / _CLASS_SAFE
     zl = -yl / _CLASS_SAFE
-    au, *_ = np.linalg.lstsq(_BERN, zu, rcond=None)
-    al, *_ = np.linalg.lstsq(_BERN, zl, rcond=None)
+    au = _ridge_least_squares(_BERN, zu)
+    al = _ridge_least_squares(_BERN, zl)
     return np.concatenate([au, al])
 
 

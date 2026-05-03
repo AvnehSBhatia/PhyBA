@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import torch
@@ -18,6 +19,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.cst_geom import cst_mae_physical, geom_mae_physical
+
+
+def _loader_kwargs(device: torch.device) -> dict:
+    nw = int(os.environ.get("PHYBA_NUM_WORKERS", "4"))
+    cpu = os.cpu_count() or 4
+    nw = max(0, min(nw, cpu))
+    pm = device.type == "cuda"
+    return {"num_workers": nw, "pin_memory": pm, "persistent_workers": nw > 0}
+
+
 from src.dataset import AirfoilCSVDataset, load_airfoil_frame
 from src.mlps import AirfoilMLPGELU, AirfoilMLPLinear, AirfoilMLPRPAN
 
@@ -52,8 +63,9 @@ def main() -> None:
     x_mean, x_std, y_mean, y_std = _fit_norm_stats(args.train)
     train_ds = AirfoilCSVDataset(args.train, x_mean, x_std, y_mean, y_std)
     val_ds = AirfoilCSVDataset(args.val, x_mean, x_std, y_mean, y_std)
-    train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True, drop_last=False)
-    val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False)
+    lk = _loader_kwargs(device)
+    train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True, drop_last=False, **lk)
+    val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False, **lk)
 
     if args.arch == "gelu":
         model: nn.Module = AirfoilMLPGELU()
@@ -77,6 +89,7 @@ def main() -> None:
     for epoch in epoch_bar:
         model.train()
         train_geom = 0.0
+        train_cst = 0.0
         n_tr = 0
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
@@ -88,8 +101,11 @@ def main() -> None:
             loss.backward()
             opt.step()
             train_geom += loss.item() * xb.size(0)
+            with torch.no_grad():
+                train_cst += cst_mae_physical(pred_p, tgt_p).item() * xb.size(0)
             n_tr += xb.size(0)
         train_geom /= max(n_tr, 1)
+        train_cst /= max(n_tr, 1)
 
         model.eval()
         val_geom = 0.0
@@ -126,10 +142,11 @@ def main() -> None:
             )
 
         epoch_bar.set_postfix(
-            train_ge=f"{train_geom:.5f}",
-            val_ge=f"{val_geom:.5f}",
-            val_cst=f"{val_cst:.5f}",
-            best=f"{best_val_geom:.5f}",
+            tr_g=f"{train_geom:.4f}",
+            tr_c=f"{train_cst:.4f}",
+            v_g=f"{val_geom:.4f}",
+            v_c=f"{val_cst:.4f}",
+            best=f"{best_val_geom:.4f}",
             refresh=False,
         )
 
