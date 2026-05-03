@@ -14,6 +14,39 @@ from src.cst_geom import CLASS_M, CLASS_N, N_CHORD_PTS
 _CHORD_X = np.linspace(1e-4, 1.0, N_CHORD_PTS, dtype=np.float64)
 
 
+def _normalize_chord_x(xy: np.ndarray) -> np.ndarray:
+    """Affine map of first column to ~[0, 1] so TE/LE polylines match the Kulfan x/c grid."""
+    out = np.asarray(xy, dtype=np.float64).copy()
+    xmin = float(out[:, 0].min())
+    xmax = float(out[:, 0].max())
+    span = max(xmax - xmin, 1e-12)
+    out[:, 0] = (out[:, 0] - xmin) / span
+    return out
+
+
+def _sort_dedupe_x(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Strictly increasing x for ``np.interp`` (mean y when x repeats)."""
+    order = np.argsort(x)
+    x, y = x[order], y[order]
+    if x.size == 0:
+        return x, y
+    ux, inv = np.unique(x, return_inverse=True)
+    sum_y = np.zeros_like(ux, dtype=np.float64)
+    np.add.at(sum_y, inv, y)
+    cnt = np.bincount(inv, minlength=len(ux)).astype(np.float64)
+    uy = sum_y / np.maximum(cnt, 1.0)
+    return ux, uy
+
+
+def _interp_clipped(xq: np.ndarray, xp: np.ndarray, fp: np.ndarray) -> np.ndarray:
+    """Like ``np.interp`` but clip ``xq`` to ``[xp.min(), xp.max()]`` (flat extrapolation)."""
+    if xp.size < 2:
+        return np.full_like(xq, fp[0] if xp.size else 0.0, dtype=np.float64)
+    lo, hi = float(xp[0]), float(xp[-1])
+    xc = np.clip(xq, lo, hi)
+    return np.interp(xc, xp, fp)
+
+
 def _class_vec(x: np.ndarray) -> np.ndarray:
     return np.power(x, CLASS_N) * np.power(1.0 - x, CLASS_M)
 
@@ -51,15 +84,14 @@ def parse_coords(val: Any) -> np.ndarray:
 
 def fit_cst_from_coords_row(xy: np.ndarray) -> np.ndarray:
     """Return shape (8,) — upper 4 + lower 4 Bernstein weights."""
+    xy = _normalize_chord_x(xy)
     le = int(np.argmin(xy[:, 0]))
     upper = xy[: le + 1]
     lower = xy[le:]
-    upper = upper[np.argsort(upper[:, 0])]
-    lower = lower[np.argsort(lower[:, 0])]
-    yu = np.interp(_CHORD_X, upper[:, 0], upper[:, 1], left=np.nan, right=np.nan)
-    yl = np.interp(_CHORD_X, lower[:, 0], lower[:, 1], left=np.nan, right=np.nan)
-    if np.isnan(yu).any() or np.isnan(yl).any():
-        raise ValueError("coords x-range does not cover chord stations for interpolation")
+    xu, yu_pts = _sort_dedupe_x(upper[:, 0], upper[:, 1])
+    xl, yl_pts = _sort_dedupe_x(lower[:, 0], lower[:, 1])
+    yu = _interp_clipped(_CHORD_X, xu, yu_pts)
+    yl = _interp_clipped(_CHORD_X, xl, yl_pts)
     zu = yu / _CLASS_SAFE
     zl = -yl / _CLASS_SAFE
     au, *_ = np.linalg.lstsq(_BERN, zu, rcond=None)
